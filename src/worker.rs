@@ -390,7 +390,7 @@ pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
             let _ = renewal.await;
         }
         let _ = latency.await;
-        crate::db::close(&pool)
+        crate::db::close_shared(&pool)
             .await
             .context("close worker database")?;
         result

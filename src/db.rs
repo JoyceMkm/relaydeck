@@ -83,6 +83,20 @@ pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Closes a long-running service's pool. Web and worker share the database and
+/// are stopped together, so the other may still hold it: a full checkpoint then
+/// reports busy although nothing is lost. Committed transactions stay in the WAL
+/// and the last connection to close checkpoints them; only real errors fail.
+pub async fn close_shared(pool: &SqlitePool) -> anyhow::Result<()> {
+    let checkpoint: Result<(i64, i64, i64), _> = sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+        .fetch_one(pool)
+        .await;
+    pool.close().await;
+    checkpoint?;
+    Ok(())
+}
+
+/// Closes a one-off command's pool, which must leave a self-contained file.
 pub async fn close(pool: &SqlitePool) -> anyhow::Result<()> {
     let checkpoint: Result<(i64, i64, i64), _> = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
         .fetch_one(pool)

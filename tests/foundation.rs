@@ -51,6 +51,43 @@ async fn live_backup_contains_wal_changes_and_mfa_key_without_sidecars() {
     relaydeck::db::close(&pool).await.unwrap();
 }
 
+#[tokio::test]
+async fn services_stop_cleanly_while_another_process_holds_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("relaydeck.db");
+    // Web and worker share one database and are stopped together by systemd.
+    let web = relaydeck::db::connect(&path).await.unwrap();
+    let worker = relaydeck::db::connect(&path).await.unwrap();
+    let command = relaydeck::db::connect(&path).await.unwrap();
+    relaydeck::api::initialize_admin(&worker, "adminroot", "test-shutdown-password".into())
+        .await
+        .unwrap();
+    let mut reading = web.begin().await.unwrap();
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&mut *reading)
+        .await
+        .unwrap();
+    assert_eq!(users, 1);
+    // One-off commands still refuse to report a self-contained file.
+    assert!(relaydeck::db::close(&command).await.is_err());
+    let started = std::time::Instant::now();
+    relaydeck::db::close_shared(&worker).await.unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "a service must not wait for the other service's readers"
+    );
+    reading.commit().await.unwrap();
+    relaydeck::db::close_shared(&web).await.unwrap();
+    assert!(!path.with_file_name("relaydeck.db-wal").exists());
+    let reopened = relaydeck::db::connect(&path).await.unwrap();
+    let name: String = sqlx::query_scalar("SELECT username FROM users")
+        .fetch_one(&reopened)
+        .await
+        .unwrap();
+    assert_eq!(name, "adminroot");
+    relaydeck::db::close(&reopened).await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn database_refuses_symlinks_and_shared_writable_directories() {

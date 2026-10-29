@@ -179,6 +179,6 @@ async fn main() -> anyhow::Result<()> {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await?;
-    relaydeck::db::close(&pool).await?;
+    relaydeck::db::close_shared(&pool).await?;
     Ok(())
 }

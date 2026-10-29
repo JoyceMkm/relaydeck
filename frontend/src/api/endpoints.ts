@@ -1,5 +1,5 @@
 import { request } from './client'
-import type { Audit, UpgradeStatus, Health, MfaEnrollment, NewUserInput, PortUsage, Rule, RuleCheck, RuleInput, Session, TrafficView, User, UserGrantInput, ViewMode } from '../types'
+import type { Audit, UpgradeStatus, Health, LatencyHistory, LatencyRange, MfaEnrollment, NewUserInput, PortUsage, Rule, RuleCheck, RuleInput, Session, TrafficView, User, UserGrantInput, ViewMode } from '../types'
 
 export const api = {
   session: () => request<Session>('/session'),
@@ -24,6 +24,7 @@ export const api = {
   updateRule: (id: number, input: RuleInput) => request<Rule>(`/rules/${id}`, 'PUT', input),
   deleteRule: (id: number) => request<{ status: string }>(`/rules/${id}`, 'DELETE'),
   checkRule: (id: number) => request<RuleCheck>(`/rules/${id}/check`, 'POST'),
+  ruleLatency: (id: number, range: LatencyRange) => request<LatencyHistory>(`/rules/${id}/latency?range=${range}`),
   retryApply: (ownerId: number) => request<void>(`/users/${ownerId}/apply`, 'POST'),
   ports: (ownerId: number) => request<PortUsage>(`/users/${ownerId}/ports`),
   traffic: (ownerId: number) => request<TrafficView>(`/users/${ownerId}/traffic`),

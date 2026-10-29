@@ -17,6 +17,7 @@ import type { Rule, RuntimeStatus, ViewMode } from '../types'
 import { acceptSession, currentUser, isAdmin, sessionState } from '../lib/session'
 import { afterRuleChange, reportError, sharedToggle, useHealth, useRules, useUsers } from '../lib/queries'
 import { hostText, protocolLabels, sourcesText, statusLabels } from '../lib/format'
+import { briefText, freshBrief } from '../lib/latency'
 import { toast } from '../lib/toast'
 
 const route = useRoute()
@@ -45,6 +46,8 @@ const searched = computed(() => {
   return needle ? scoped.value.filter(rule => `${rule.name} ${rule.listen_port} ${rule.target_host} ${rule.target_port} ${rule.owner_username}`.toLowerCase().includes(needle)) : scoped.value
 })
 const visible = computed(() => searched.value.filter(rule => filter.value === 'all' || rule.runtime_status === filter.value))
+// Recomputed with every rules poll, so a stopped probe ages out within a few minutes.
+const latency = computed(() => new Map(all.value.map(rule => [rule.id, freshBrief(rule)])))
 const counts = computed(() => {
   const result: Record<Filter, number> = { all: searched.value.length, active: 0, pending: 0, failed: 0, blocked: 0, stopped: 0 }
   for (const rule of searched.value) result[rule.runtime_status]++
@@ -215,6 +218,10 @@ const cloneSource = computed(() => (route.name === 'rule-new' && route.query.fro
             <dt class="text-muted">入口</dt><dd class="font-medium tabular">{{ rule.listen_port }}</dd>
             <dt class="text-muted">落地</dt><dd class="truncate tabular" :title="rule.target_ip !== rule.target_host ? rule.target_ip : undefined">{{ hostText(rule.target_host) }}:{{ rule.target_port }}</dd>
             <dt class="text-muted">来源</dt><dd class="truncate">{{ sourcesText(rule.source_cidrs) }}</dd>
+            <template v-if="latency.get(rule.id)">
+              <dt class="text-muted">延迟</dt>
+              <dd class="tabular" :class="latency.get(rule.id)!.status === 'connected' ? '' : 'text-danger'">{{ briefText(latency.get(rule.id)!) }}</dd>
+            </template>
           </dl>
           <p v-if="rule.runtime_error" class="line-clamp-2 font-mono text-xs text-danger">{{ rule.runtime_error }}</p>
           <p v-else-if="rule.dns_error" class="line-clamp-2 text-xs text-warning">目标解析失败：{{ rule.dns_error }}</p>
@@ -224,7 +231,7 @@ const cloneSource = computed(() => (route.name === 'rule-new' && route.query.fro
       <div v-else class="panel overflow-hidden">
         <div class="grid grid-cols-[1.25rem_minmax(10rem,1.2fr)_minmax(14rem,1.8fr)_6rem_2.75rem_2rem] items-center gap-x-4 border-b border-line px-4 pt-3 pb-2 text-xs text-muted max-md:hidden">
           <input type="checkbox" class="size-4 accent-[var(--accent)]" :checked="allSelected" :indeterminate="selected.size > 0 && !allSelected" aria-label="全选当前列表" @change="toggleAll" />
-          <span>名称</span><span>入口 → 落地</span><span>协议</span><span class="sr-only">启用</span><span class="sr-only">操作</span>
+          <span>名称</span><span>入口 → 落地</span><span>协议 · 延迟</span><span class="sr-only">启用</span><span class="sr-only">操作</span>
         </div>
         <ul class="group-list">
           <li
@@ -244,12 +251,15 @@ const cloneSource = computed(() => (route.name === 'rule-new' && route.query.fro
                   <template v-if="rule.runtime_status === 'failed'">失败{{ rule.runtime_error ? `：${rule.runtime_error}` : '' }}</template>
                   <template v-else-if="rule.runtime_status === 'blocked'">已阻断{{ rule.dns_error ? `：${rule.dns_error}` : '' }}</template>
                   <template v-else-if="rule.dns_error">{{ rule.enabled ? '解析失败' : '解析失败，已停用' }}{{ isAdmin ? ` · ${rule.owner_username}` : '' }}</template>
-                  <template v-else>{{ statusLabels[rule.runtime_status] }}{{ isAdmin ? ` · ${rule.owner_username}` : '' }}</template>
+                  <template v-else>{{ statusLabels[rule.runtime_status] }}{{ isAdmin ? ` · ${rule.owner_username}` : '' }}<span v-if="latency.get(rule.id)" class="md:hidden"> · {{ briefText(latency.get(rule.id)!) }}</span></template>
                 </p>
               </div>
             </div>
             <RuleEndpoint class="min-w-0 max-md:col-start-1 max-md:row-start-2 max-md:pl-6" :port="rule.listen_port" :host="rule.target_host" :target-port="rule.target_port" :resolved="rule.target_ip" />
-            <span class="text-sm text-muted max-md:hidden">{{ protocolLabels[rule.protocol] }}</span>
+            <span class="grid text-sm text-muted max-md:hidden">
+              <span>{{ protocolLabels[rule.protocol] }}</span>
+              <span v-if="latency.get(rule.id)" class="text-xs tabular" :class="latency.get(rule.id)!.status === 'connected' ? 'text-faint' : 'text-danger'" :title="`近 1 小时丢包 ${latency.get(rule.id)!.lost}/${latency.get(rule.id)!.total}`">{{ briefText(latency.get(rule.id)!) }}</span>
+            </span>
             <div class="flex justify-end max-md:col-start-2 max-md:row-start-1" @click.stop>
               <UiSwitch :model-value="rule.enabled" :label="`${rule.enabled ? '停用' : '启用'}「${rule.name}」`" :disabled="toggle.isPending.value" @update:model-value="toggle.mutate({ rule, enabled: $event })" />
             </div>

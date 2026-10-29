@@ -1,8 +1,8 @@
 import { computed, type MaybeRefOrGetter, toValue } from 'vue'
 import { useDocumentVisibility } from '@vueuse/core'
-import { useMutation, useQuery } from '@tanstack/vue-query'
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/vue-query'
 import { api, ruleInput } from '../api/endpoints'
-import type { Rule, RuleInput } from '../types'
+import type { LatencyRange, Rule, RuleInput } from '../types'
 import { ApiError, errorMessage, isStaleError, securityMutationPending } from '../api/client'
 import { isAdmin, refreshIdentity, sessionState } from './session'
 import { queryClient } from './queryClient'
@@ -52,12 +52,24 @@ export function useTraffic(ownerId: MaybeRefOrGetter<number | null | undefined>)
   return useQuery({ queryKey: computed(() => ['traffic', toValue(ownerId) ?? 0]), queryFn: () => api.traffic(toValue(ownerId)!), enabled: computed(() => signedIn.value && !!toValue(ownerId)), refetchInterval: poll(5_000) })
 }
 
+/** Background probes land every minute; a range switch keeps the previous chart until data arrives. */
+export function useRuleLatency(ruleId: MaybeRefOrGetter<number | null | undefined>, range: MaybeRefOrGetter<LatencyRange>) {
+  return useQuery({
+    queryKey: computed(() => ['latency', toValue(ruleId) ?? 0, toValue(range)]),
+    queryFn: () => api.ruleLatency(toValue(ruleId)!, toValue(range)),
+    enabled: computed(() => signedIn.value && !!toValue(ruleId)),
+    placeholderData: keepPreviousData,
+    refetchInterval: poll(30_000),
+  })
+}
+
 /** Everything a rule or grant change can move: lists, quota counts, port leases, history. */
 export async function afterRuleChange() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: keys.rules }),
     queryClient.invalidateQueries({ queryKey: ['ports'] }),
     queryClient.invalidateQueries({ queryKey: ['traffic'] }),
+    queryClient.invalidateQueries({ queryKey: ['latency'] }),
     queryClient.invalidateQueries({ queryKey: keys.users }),
     queryClient.invalidateQueries({ queryKey: keys.audit }),
     refreshIdentity(),

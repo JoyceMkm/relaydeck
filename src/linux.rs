@@ -1176,32 +1176,107 @@ impl LinuxDriver {
         #[cfg(target_os = "linux")]
         if rule.protocol.tcp() {
             let uid = self.policy.uid(plan.owner_id())?;
-            let mut child = Command::new(&self.policy.runner_binary);
-            child
-                .arg("probe-tcp")
-                .arg(std::net::SocketAddr::new(rule.target_ip, rule.target_port).to_string())
-                .uid(uid)
-                .gid(uid)
-                .env_clear()
-                .kill_on_drop(true);
-            unsafe {
-                child.pre_exec(|| {
-                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-            let output = tokio::time::timeout(Duration::from_secs(3), child.output())
-                .await
-                .context("connectivity child timed out")??;
-            ensure!(
-                output.status.success() && output.stdout.len() <= 512,
-                "connectivity child failed"
-            );
-            result.target_tcp = Some(serde_json::from_slice(&output.stdout)?);
+            let address = std::net::SocketAddr::new(rule.target_ip, rule.target_port);
+            let output = self
+                .tenant_probe(
+                    uid,
+                    &["probe-tcp".into(), address.to_string()],
+                    Duration::from_secs(3),
+                    512,
+                )
+                .await?;
+            result.target_tcp = Some(serde_json::from_slice(&output)?);
         }
         Ok(result)
+    }
+    /// Runs the unprivileged runner as a tenant UID, so its sockets remain
+    /// subject to that tenant's kernel egress policy.
+    #[cfg(target_os = "linux")]
+    async fn tenant_probe(
+        &self,
+        uid: u32,
+        arguments: &[String],
+        timeout: Duration,
+        limit: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut child = Command::new(&self.policy.runner_binary);
+        child
+            .args(arguments)
+            .uid(uid)
+            .gid(uid)
+            .env_clear()
+            .kill_on_drop(true);
+        unsafe {
+            child.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = tokio::time::timeout(timeout, child.output())
+            .await
+            .context("connectivity child timed out")??;
+        ensure!(
+            output.status.success() && output.stdout.len() <= limit,
+            "connectivity child failed"
+        );
+        Ok(output.stdout)
+    }
+    /// TCP targets of applied plans whose broker authorization is current. A
+    /// probe can only ever reach a destination the tenant is already granted.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn latency_targets(
+        &self,
+        authorized: &[(i64, i64)],
+        timestamp: i64,
+    ) -> Vec<(i64, i64, Vec<(i64, std::net::SocketAddr)>)> {
+        let plans = self.plans.lock().await;
+        authorized
+            .iter()
+            .filter_map(|(owner, revision)| {
+                let plan = plans.get(owner).filter(|plan| {
+                    plan.revision() == *revision
+                        && plan.expires_at().is_none_or(|expiry| expiry > timestamp)
+                })?;
+                let targets: Vec<_> = plan
+                    .rules()
+                    .iter()
+                    .filter(|rule| rule.enabled && rule.protocol.tcp())
+                    .map(|rule| {
+                        (
+                            rule.id,
+                            std::net::SocketAddr::new(rule.target_ip, rule.target_port),
+                        )
+                    })
+                    .collect();
+                (!targets.is_empty()).then_some((*owner, *revision, targets))
+            })
+            .collect()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn probe_latency(
+        &self,
+        owner: i64,
+        addresses: &[std::net::SocketAddr],
+    ) -> anyhow::Result<Vec<crate::latency::Probe>> {
+        ensure!(
+            !addresses.is_empty() && addresses.len() <= crate::executor::MAX_RULES,
+            "invalid latency probe batch"
+        );
+        let uid = self.policy.uid(owner)?;
+        let mut arguments = vec!["probe-latency".to_string()];
+        arguments.extend(addresses.iter().map(ToString::to_string));
+        // Each address may take one handshake plus three slow-path retries.
+        let output = self
+            .tenant_probe(uid, &arguments, Duration::from_secs(12), 16 * 1024)
+            .await?;
+        let probes: Vec<crate::latency::Probe> = serde_json::from_slice(&output)?;
+        ensure!(
+            probes.len() == addresses.len() && probes.iter().all(crate::latency::Probe::valid),
+            "invalid latency probe output"
+        );
+        Ok(probes)
     }
     pub async fn new(policy: BrokerPolicy) -> anyhow::Result<Self> {
         policy.validate()?;

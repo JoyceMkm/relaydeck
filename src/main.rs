@@ -29,6 +29,27 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&result)?);
         return Ok(());
     }
+    if let [command, addresses @ ..] = arguments.as_slice()
+        && command == "probe-latency"
+    {
+        #[cfg(unix)]
+        anyhow::ensure!(
+            unsafe { libc::geteuid() } != 0,
+            "latency probes must run without root"
+        );
+        anyhow::ensure!(
+            !addresses.is_empty() && addresses.len() <= relaydeck::executor::MAX_RULES,
+            "latency probes require 1-{} addresses",
+            relaydeck::executor::MAX_RULES
+        );
+        let addresses = addresses
+            .iter()
+            .map(|address| address.parse())
+            .collect::<Result<Vec<std::net::SocketAddr>, _>>()?;
+        let probes = relaydeck::latency::probe_all(&addresses).await;
+        println!("{}", serde_json::to_string(&probes)?);
+        return Ok(());
+    }
     if let [command, realm, config, expires_at, uid] = arguments.as_slice()
         && command == "tenant"
     {

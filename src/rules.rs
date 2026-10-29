@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::IpAddr,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -6,7 +7,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State, rejection::QueryRejection},
     http::StatusCode,
     routing::{get, post, put},
 };
@@ -125,6 +126,8 @@ struct RuleView {
     runtime_updated_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
+    /// Latest background probe of the current target; only the list fills it.
+    latency: Option<crate::latency::Brief>,
 }
 
 impl DbRule {
@@ -151,6 +154,7 @@ impl DbRule {
             runtime_updated_at: self.runtime_updated_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            latency: None,
         })
     }
 }
@@ -401,11 +405,50 @@ async fn list_rules(
             .fetch_all(&state.pool)
             .await?
     };
-    Ok(Json(
-        rows.into_iter()
-            .map(DbRule::into_view)
-            .collect::<Result<_, _>>()?,
-    ))
+    let owner = (auth.user.role != "admin").then_some(auth.user.id);
+    let mut briefs: HashMap<i64, crate::latency::Brief> =
+        crate::latency::briefs(&state.pool, owner, now())
+            .await?
+            .into_iter()
+            .map(|brief| (brief.rule_id, brief))
+            .collect();
+    let mut views = rows
+        .into_iter()
+        .map(DbRule::into_view)
+        .collect::<Result<Vec<_>, _>>()?;
+    for view in &mut views {
+        view.latency = briefs.remove(&view.id);
+    }
+    Ok(Json(views))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LatencyQuery {
+    range: Option<crate::latency::Range>,
+}
+
+// Read-only and fed by the broker's own schedule, so it needs no probe budget.
+async fn rule_latency(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<i64>,
+    query: Result<Query<LatencyQuery>, QueryRejection>,
+) -> Result<Json<crate::latency::History>, ApiError> {
+    auth.ready()?;
+    let Query(query) = query.map_err(|_| ApiError::bad_request("时间范围无效"))?;
+    let rule = load_rule(&state.pool, &auth.user, id).await?;
+    let history = crate::latency::history(
+        &state.pool,
+        rule.id,
+        &rule.target_ip,
+        rule.target_port,
+        matches!(rule.protocol.as_str(), "tcp" | "both"),
+        query.range.unwrap_or(crate::latency::Range::Hour),
+        now(),
+    )
+    .await?;
+    Ok(Json(history))
 }
 
 async fn check_rule(
@@ -628,4 +671,5 @@ pub fn routes() -> Router<AppState> {
         .route("/api/rules", get(list_rules).post(create_rule))
         .route("/api/rules/{id}", put(update_rule).delete(delete_rule))
         .route("/api/rules/{id}/check", post(check_rule))
+        .route("/api/rules/{id}/latency", get(rule_latency))
 }

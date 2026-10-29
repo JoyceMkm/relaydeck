@@ -85,6 +85,11 @@ else:raise AssertionError('unmarked tenant reached non-target peer')
                 # A handshake can succeed before the kernel drops later payload packets.
                 if allowed == 'yes':
                     assert result['status'] == 'connected', result
+                    probes = json.loads(run('ip','netns','exec',client,'setpriv','--reuid','60000','--regid','60000','--clear-groups','--bounding-set=-all',binary,'probe-latency','[2001:4860:44::2]:443','[2001:4860:44::2]:444'))
+                    assert probes[0]['status'] == 'connected' and isinstance(probes[0]['latency_ms'], int), probes
+                    # The tenant's egress policy, not the probe, decides reach: a refusal
+                    # would mean the ungranted port's SYN left the host.
+                    assert probes[1] == {'status': probes[1]['status'], 'latency_ms': None} and probes[1]['status'] in ('timeout', 'unreachable'), probes
             run('ip', 'netns', 'exec', client, 'setpriv', '--reuid', '60000', '--regid', '60000',
                 '--clear-groups', '--bounding-set=-all', 'python3', '-c', probe, allowed)
         print('WireGuard TCP/UDP forwarding and unmarked target isolation passed')

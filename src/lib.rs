@@ -8,6 +8,7 @@ pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod executor;
+pub mod latency;
 pub mod limits;
 pub mod linux;
 pub mod mfa;

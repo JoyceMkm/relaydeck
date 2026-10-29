@@ -278,6 +278,37 @@ async fn renewal_loop(pool: SqlitePool, driver: Arc<SocketDriver>) {
     }
 }
 
+/// Moves latency samples from the broker into SQLite and expires old history.
+#[cfg(target_os = "linux")]
+async fn latency_loop(pool: SqlitePool, driver: Arc<SocketDriver>) {
+    let mut clock = tokio::time::interval(Duration::from_secs(20));
+    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pruned_at = 0;
+    loop {
+        clock.tick().await;
+        let moved = async {
+            // Drained samples are not queued again: a failed write loses
+            // monitoring points, never forwarding state.
+            for _ in 0..8 {
+                let samples = driver.latency().await?;
+                crate::latency::record(&pool, &samples).await?;
+                if samples.len() < crate::latency::PAGE {
+                    break;
+                }
+            }
+            if now() - pruned_at >= 600 {
+                crate::latency::prune(&pool, now()).await?;
+                pruned_at = now();
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = moved {
+            tracing::warn!(%error, "latency samples deferred");
+        }
+    }
+}
+
 pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -317,6 +348,7 @@ pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut renewal = tokio::spawn(renewal_loop(pool.clone(), driver.clone()));
+        let latency = tokio::spawn(latency_loop(pool.clone(), driver.clone()));
         let result = async {
             loop {
                 tokio::select! {
@@ -353,9 +385,11 @@ pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
         }.await;
         let renewal_finished = renewal.is_finished();
         renewal.abort();
+        latency.abort();
         if !renewal_finished {
             let _ = renewal.await;
         }
+        let _ = latency.await;
         crate::db::close(&pool)
             .await
             .context("close worker database")?;

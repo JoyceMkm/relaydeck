@@ -2868,3 +2868,220 @@ async fn individual_rule_failure_does_not_misreport_healthy_siblings_or_accept_s
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
 }
+
+#[tokio::test]
+async fn latency_history_is_scoped_to_current_targets_and_bounded_ranges() {
+    use relaydeck::latency::{ProbeStatus, Sample};
+    let f = Fixture::new().await;
+    let alice = f.add_user("alice", 41000).await;
+    let bob = f.add_user("bob", 42000).await;
+    let owner = alice.user["id"].as_i64().unwrap();
+    let (status, _, created) = call(
+        &f.app,
+        "POST",
+        "/api/rules",
+        Some(rule(41000)),
+        Some(&alice),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_i64().unwrap();
+    let mut udp = rule(41001);
+    udp["protocol"] = json!("udp");
+    let (_, _, udp) = call(&f.app, "POST", "/api/rules", Some(udp), Some(&alice), true).await;
+    let (slot, revision): (i64, i64) =
+        sqlx::query_as("SELECT COALESCE(runtime_slot,id),desired_revision FROM users WHERE id=?")
+            .bind(owner)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    let now = relaydeck::db::now();
+    let sample = |seconds_ago: i64, status: ProbeStatus, latency_ms: Option<u32>| Sample {
+        owner: slot,
+        revision,
+        rule_id: id,
+        target_ip: "8.8.8.8".parse().unwrap(),
+        target_port: 443,
+        observed_at: now - seconds_ago,
+        status,
+        latency_ms,
+    };
+    let stale_revision = Sample {
+        revision: revision - 1,
+        observed_at: now - 90,
+        ..sample(0, ProbeStatus::Connected, Some(1))
+    };
+    let other_target = Sample {
+        target_ip: "1.1.1.1".parse().unwrap(),
+        observed_at: now - 80,
+        ..sample(0, ProbeStatus::Connected, Some(1))
+    };
+    let other_owner = Sample {
+        owner: slot + 1,
+        observed_at: now - 70,
+        ..sample(0, ProbeStatus::Connected, Some(1))
+    };
+    let malformed = sample(10, ProbeStatus::Timeout, Some(5));
+    let stored = relaydeck::latency::record(
+        &f.state.pool,
+        &[
+            sample(150, ProbeStatus::Connected, Some(30)),
+            sample(100, ProbeStatus::Timeout, None),
+            sample(40, ProbeStatus::Connected, Some(50)),
+            stale_revision,
+            other_target,
+            other_owner,
+            malformed,
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stored, 3,
+        "only current samples of the probed target are kept"
+    );
+
+    let path = format!("/api/rules/{id}/latency");
+    assert_eq!(
+        call(&f.app, "GET", &path, None, None, false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&f.app, "GET", &path, None, Some(&bob), false).await.0,
+        StatusCode::NOT_FOUND
+    );
+    for query in ["?range=2h", "?range=1h&probe=1.1.1.1:22"] {
+        let (status, _, body) = call(
+            &f.app,
+            "GET",
+            &format!("{path}{query}"),
+            None,
+            Some(&alice),
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_input");
+    }
+    let (status, _, hour) = call(&f.app, "GET", &path, None, Some(&alice), false).await;
+    assert_eq!(status, StatusCode::OK, "{hour}");
+    assert_eq!(hour["supported"], true);
+    assert_eq!(hour["step_secs"], 60);
+    assert_eq!(hour["points"].as_array().unwrap().len(), 3);
+    assert_eq!(hour["points"][1]["lost"], 1);
+    assert_eq!(hour["points"][1]["avg_ms"], Value::Null);
+    assert_eq!(hour["latest"]["status"], "connected");
+    assert_eq!(hour["latest"]["latency_ms"], 50);
+    let summary = &hour["summary"];
+    assert_eq!(
+        (summary["total"].as_i64(), summary["lost"].as_i64()),
+        (Some(3), Some(1))
+    );
+    assert_eq!(summary["loss_percent"], 33.3);
+    assert_eq!(summary["avg_ms"], 40);
+    assert_eq!(
+        (summary["p50_ms"].as_i64(), summary["p99_ms"].as_i64()),
+        (Some(30), Some(50))
+    );
+
+    let (_, _, day) = call(
+        &f.app,
+        "GET",
+        &format!("{path}?range=24h"),
+        None,
+        Some(&f.admin),
+        false,
+    )
+    .await;
+    assert_eq!(day["step_secs"], 300);
+    let points = day["points"].as_array().unwrap();
+    assert_eq!(
+        points
+            .iter()
+            .map(|p| p["total"].as_i64().unwrap())
+            .sum::<i64>(),
+        3
+    );
+    assert_eq!(
+        points
+            .iter()
+            .map(|p| p["lost"].as_i64().unwrap())
+            .sum::<i64>(),
+        1
+    );
+    assert_eq!(day["summary"]["p99_ms"], 50);
+
+    let (_, _, rules) = call(&f.app, "GET", "/api/rules", None, Some(&alice), false).await;
+    let listed = rules.as_array().unwrap();
+    let brief = &listed.iter().find(|r| r["id"] == id).unwrap()["latency"];
+    assert_eq!(brief["latency_ms"], 50);
+    assert_eq!(
+        (brief["total"].as_i64(), brief["lost"].as_i64()),
+        (Some(3), Some(1))
+    );
+    assert!(brief.get("rule_id").is_none());
+    assert_eq!(
+        listed.iter().find(|r| r["id"] == udp["id"]).unwrap()["latency"],
+        Value::Null
+    );
+    let (_, _, rules) = call(&f.app, "GET", "/api/rules", None, Some(&bob), false).await;
+    assert!(rules.as_array().unwrap().is_empty());
+    let (_, _, udp_history) = call(
+        &f.app,
+        "GET",
+        &format!("/api/rules/{}/latency", udp["id"]),
+        None,
+        Some(&alice),
+        false,
+    )
+    .await;
+    assert_eq!(udp_history["supported"], false);
+
+    // Raw samples expire after a day; the weekly view keeps its aggregates.
+    relaydeck::latency::prune(&f.state.pool, now + 24 * 60 * 60)
+        .await
+        .unwrap();
+    let (_, _, hour) = call(&f.app, "GET", &path, None, Some(&alice), false).await;
+    assert_eq!(hour["summary"]["total"], 0);
+    assert_eq!(hour["latest"], Value::Null);
+    let (_, _, week) = call(
+        &f.app,
+        "GET",
+        &format!("{path}?range=7d"),
+        None,
+        Some(&alice),
+        false,
+    )
+    .await;
+    assert_eq!(week["step_secs"], 3600);
+    assert_eq!(week["summary"]["total"], 3);
+    assert_eq!(week["summary"]["avg_ms"], 40);
+    assert_eq!(week["summary"]["p50_ms"], Value::Null);
+
+    // A new destination starts a new history.
+    let mut moved = rule(41000);
+    moved["target_host"] = json!("1.1.1.1");
+    let (status, _, value) = call(
+        &f.app,
+        "PUT",
+        &format!("/api/rules/{id}"),
+        Some(moved),
+        Some(&alice),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let (_, _, week) = call(
+        &f.app,
+        "GET",
+        &format!("{path}?range=7d"),
+        None,
+        Some(&alice),
+        false,
+    )
+    .await;
+    assert_eq!(week["target_ip"], "1.1.1.1");
+    assert_eq!(week["summary"]["total"], 0);
+    assert!(week["points"].as_array().unwrap().is_empty());
+}

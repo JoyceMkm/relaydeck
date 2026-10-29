@@ -61,6 +61,36 @@ export interface Rule {
   runtime_updated_at: number | null
   created_at: number
   updated_at: number
+  /** Latest background probe of the current target; present only in the rule list. */
+  latency?: LatencyBrief | null
+}
+
+export type LatencyStatus = 'connected' | 'timeout' | 'refused' | 'unreachable' | 'retransmit'
+export type LatencyRange = '1h' | '24h' | '7d'
+export interface LatencyBrief { observed_at: number; status: LatencyStatus; latency_ms: number | null; total: number; lost: number }
+export interface LatencyPoint { at: number; total: number; lost: number; avg_ms: number | null; min_ms: number | null; max_ms: number | null }
+export interface LatencySummary {
+  total: number
+  lost: number
+  loss_percent: number | null
+  avg_ms: number | null
+  min_ms: number | null
+  max_ms: number | null
+  p50_ms: number | null
+  p99_ms: number | null
+}
+export interface LatencyHistory {
+  rule_id: number
+  target_ip: string
+  target_port: number
+  supported: boolean
+  interval_secs: number
+  step_secs: number
+  from: number
+  to: number
+  latest: { observed_at: number; status: LatencyStatus; latency_ms: number | null } | null
+  summary: LatencySummary
+  points: LatencyPoint[]
 }
 
 export interface RuleInput {

@@ -11,6 +11,7 @@ import PortRuler from './PortRuler.vue'
 import Segmented from './Segmented.vue'
 import UiSwitch from './UiSwitch.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
+import LatencyPanel from './LatencyPanel.vue'
 import { ApiError, errorMessage, isStaleError } from '../api/client'
 import { api, ruleInput } from '../api/endpoints'
 import type { Health, Protocol, Rule, RuleInput, User } from '../types'
@@ -273,7 +274,7 @@ defineExpose({ dirty })
             <span class="font-medium" :class="rule.runtime_status === 'failed' ? 'text-danger' : 'text-fg'">{{ runtime.title }}</span>
             <span v-if="runtime.detail" class="text-sm text-muted">{{ runtime.detail }}</span>
             <button v-if="rule.runtime_status === 'active'" type="button" class="btn btn-secondary btn-sm ml-auto" :disabled="dirty || check.isPending.value" @click="runCheck">
-              <RotateCw class="size-3.5" :class="check.isPending.value ? 'anim-spin' : ''" />{{ check.isPending.value ? '检测中' : '检测' }}
+              <RotateCw class="size-3.5" :class="check.isPending.value ? 'anim-spin' : ''" />{{ check.isPending.value ? '检测中' : '立即检测' }}
             </button>
             <button v-if="rule.runtime_status === 'failed'" type="button" class="btn btn-secondary btn-sm ml-auto" :disabled="retry.isPending.value" @click="retry.mutate(rule.owner_id)">
               <RotateCw class="size-3.5" :class="retry.isPending.value ? 'anim-spin' : ''" />重试
@@ -290,6 +291,8 @@ defineExpose({ dirty })
             <dt class="text-muted">检测时间</dt><dd class="text-muted tabular">{{ dateTime(checkResult.checked_at) }}</dd>
           </dl>
         </section>
+
+        <LatencyPanel v-if="rule" :rule="rule" />
 
         <form id="rule-form" class="grid gap-5" novalidate @submit.prevent="submit">
           <label class="field">

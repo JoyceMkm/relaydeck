@@ -25,6 +25,7 @@ enum Request {
     Acknowledge(Vec<(i64, i64)>),
     Check(crate::connectivity::CheckRequest),
     Traffic(Vec<crate::traffic::TrafficGrant>),
+    Latency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +58,9 @@ struct Reply {
     traffic: Option<Vec<crate::traffic::TrafficSnapshot>>,
     #[serde(default)]
     rules: Vec<RuleStatus>,
+    // Omitted when empty, so a worker from the previous release still parses replies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    latency: Vec<crate::latency::Sample>,
 }
 
 impl crate::connectivity::CheckChannel for SocketDriver {
@@ -179,6 +183,10 @@ impl SocketDriver {
         self.request(Request::Acknowledge(events.to_vec())).await?;
         Ok(())
     }
+    /// Takes up to one page of buffered latency samples from the broker.
+    pub async fn latency(&self) -> anyhow::Result<Vec<crate::latency::Sample>> {
+        Ok(self.request(Request::Latency).await?.latency)
+    }
     pub async fn traffic(
         &self,
         grants: Vec<crate::traffic::TrafficGrant>,
@@ -215,6 +223,80 @@ impl ExecutorDriver for std::sync::Arc<SocketDriver> {
     }
     fn stop(&self, owner: i64) -> DriverFuture<'_> {
         self.as_ref().stop(owner)
+    }
+}
+
+#[cfg(target_os = "linux")]
+type Leases = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<i64, (RuntimePlan, i64)>>>;
+#[cfg(target_os = "linux")]
+type SampleBuffer =
+    std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<crate::latency::Sample>>>;
+/// About twelve rounds of a full default installation (11 accounts × 30 rules);
+/// older samples are dropped first.
+#[cfg(target_os = "linux")]
+const MAX_BUFFERED_SAMPLES: usize = 4096;
+
+/// Probes on the broker's own clock: no socket request can add probes or choose targets.
+#[cfg(target_os = "linux")]
+async fn latency_loop(
+    driver: std::sync::Arc<crate::linux::LinuxDriver>,
+    leases: Leases,
+    buffer: SampleBuffer,
+) {
+    let mut clock = tokio::time::interval(Duration::from_secs(crate::latency::PROBE_INTERVAL_SECS));
+    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    loop {
+        clock.tick().await;
+        let observed_at = crate::db::now();
+        let authorized: Vec<(i64, i64)> = leases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, (_, until))| *until > observed_at)
+            .map(|(owner, (plan, _))| (*owner, plan.revision()))
+            .collect();
+        let mut probes = tokio::task::JoinSet::new();
+        for (owner, revision, targets) in driver.latency_targets(&authorized, observed_at).await {
+            let driver = driver.clone();
+            let slots = slots.clone();
+            probes.spawn(async move {
+                let addresses: Vec<_> = targets.iter().map(|(_, address)| *address).collect();
+                let result = match slots.acquire_owned().await {
+                    Ok(_slot) => driver.probe_latency(owner, &addresses).await,
+                    Err(error) => Err(error.into()),
+                };
+                (owner, revision, targets, result)
+            });
+        }
+        while let Some(joined) = probes.join_next().await {
+            let Ok((owner, revision, targets, result)) = joined else {
+                continue;
+            };
+            let results = match result {
+                Ok(results) => results,
+                Err(error) => {
+                    tracing::warn!(owner_id = owner, %error, "latency probe deferred");
+                    continue;
+                }
+            };
+            let mut queue = buffer.lock().unwrap();
+            for ((rule_id, address), probe) in targets.into_iter().zip(results) {
+                queue.push_back(crate::latency::Sample {
+                    owner,
+                    revision,
+                    rule_id,
+                    target_ip: address.ip(),
+                    target_port: address.port(),
+                    observed_at,
+                    status: probe.status,
+                    latency_ms: probe.latency_ms,
+                });
+            }
+            while queue.len() > MAX_BUFFERED_SAMPLES {
+                queue.pop_front();
+            }
+        }
     }
 }
 
@@ -265,8 +347,12 @@ pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
         );
         std::fs::set_permissions(&policy.socket_path, std::fs::Permissions::from_mode(0o660))?;
         let driver = std::sync::Arc::new(LinuxDriver::new(policy.clone()).await?);
-        let leases = std::sync::Arc::new(std::sync::Mutex::new(
-            BTreeMap::<i64, (RuntimePlan, i64)>::new(),
+        let leases: Leases = std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let samples: SampleBuffer = Default::default();
+        let prober = tokio::spawn(latency_loop(
+            driver.clone(),
+            leases.clone(),
+            samples.clone(),
         ));
         let renew_path = policy.socket_path.with_file_name("renew.sock");
         if let Ok(meta) = std::fs::symlink_metadata(&renew_path) {
@@ -339,7 +425,8 @@ pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
         let mut events: BTreeMap<i64, Failure> = BTreeMap::new();
         let mut blocked: BTreeMap<i64, i64> = BTreeMap::new();
         let mut stopping = std::collections::BTreeSet::new();
-        let mut last_check: Option<std::time::Instant> = None;
+        // Per account, so one tenant's checks never throttle another's.
+        let mut last_check: BTreeMap<i64, std::time::Instant> = BTreeMap::new();
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         let mut traffic_clock = tokio::time::interval(Duration::from_secs(1));
         traffic_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -386,9 +473,14 @@ pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
                                 Request::Traffic(grants) => {reply.retryable=true;reply.traffic=Some(driver.traffic(&grants).await?);}
                                 Request::Check(check) => {
                                     ensure!(leases.lock().unwrap().get(&check.owner_id).is_some_and(|(plan,until)|plan.revision() == check.revision && *until > crate::db::now()), "connectivity authorization is stale");
-                                    ensure!(last_check.is_none_or(|time| time.elapsed() >= Duration::from_secs(5)), "connectivity checks are rate limited");
-                                    last_check = Some(std::time::Instant::now());
+                                    ensure!(last_check.get(&check.owner_id).is_none_or(|time| time.elapsed() >= Duration::from_secs(5)), "connectivity checks are rate limited");
+                                    last_check.insert(check.owner_id, std::time::Instant::now());
                                     reply.check = Some(driver.check_rule(&check).await?);
+                                }
+                                Request::Latency => {
+                                    let mut queue = samples.lock().unwrap();
+                                    let count = queue.len().min(crate::latency::PAGE);
+                                    reply.latency = queue.drain(..count).collect();
                                 }
                                 Request::Acknowledge(ack) => {
                                     ensure!(ack.len() <= policy.max_owners as usize,"too many acknowledgements");
@@ -437,9 +529,11 @@ pub async fn run(policy_path: &Path) -> anyhow::Result<()> {
         }.await;
         let renewal_finished = renewer.is_finished();
         renewer.abort();
+        prober.abort();
         if !renewal_finished {
             let _ = renewer.await;
         }
+        let _ = prober.await;
         leases.lock().unwrap().clear();
         let shutdown = driver.shutdown().await;
         std::fs::remove_file(&renew_path)?;

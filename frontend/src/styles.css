@@ -42,6 +42,9 @@
   --meter-warn: #e0a243;
   --meter-bad: #d9574d;
   --meter-off: #ebe8e1;
+  /* Latency chart marks, validated as a pair (CVD, contrast) against --surface in each theme. */
+  --chart-line: #3d5a99;
+  --chart-loss: #c23a32;
   --overlay: rgb(31 30 27 / 0.22);
   --shadow-card: 0 1px 2px rgb(60 50 30 / 0.03), 0 8px 24px -14px rgb(60 50 30 / 0.12);
   --shadow-pop: 0 0 0 1px rgb(60 50 30 / 0.05), 0 16px 36px -12px rgb(60 50 30 / 0.18);
@@ -91,6 +94,8 @@
     --meter-warn: #d6a24c;
     --meter-bad: #d9574d;
     --meter-off: #33312d;
+  --chart-line: #6a8fdc;
+  --chart-loss: #e2645b;
     --overlay: rgb(8 8 7 / 0.5);
     --shadow-card: 0 1px 2px rgb(0 0 0 / 0.25);
     --shadow-pop: 0 0 0 1px rgb(255 255 255 / 0.06), 0 16px 40px -10px rgb(0 0 0 / 0.6);
@@ -140,6 +145,8 @@
   --meter-warn: #d6a24c;
   --meter-bad: #d9574d;
   --meter-off: #33312d;
+  --chart-line: #6a8fdc;
+  --chart-loss: #e2645b;
   --overlay: rgb(8 8 7 / 0.5);
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.25);
   --shadow-pop: 0 0 0 1px rgb(255 255 255 / 0.06), 0 16px 40px -10px rgb(0 0 0 / 0.6);
@@ -177,6 +184,8 @@
   --color-danger-soft: var(--danger-soft);
   --color-violet: var(--violet);
   --color-violet-soft: var(--violet-soft);
+  --color-chart-line: var(--chart-line);
+  --color-chart-loss: var(--chart-loss);
   /* System face first (SF Pro / PingFang on Apple devices); self-hosted Inter elsewhere. */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Geist Mono Variable", Menlo, Consolas, monospace;

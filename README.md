@@ -19,7 +19,7 @@
 
 ## 部署
 
-使用 [Releases](https://github.com/JoyceBupt/relaydeck/releases) 中的预编译包；服务器无需 Rust、Node 或 pnpm。
+使用 [Releases](https://github.com/JoyceMkm/relaydeck/releases) 中的预编译包；服务器无需 Rust、Node 或 pnpm。
 
 要求：Linux、systemd、cgroup v2、内核 cgroup BPF、Python 3.11+、nftables、iproute2 和 Caddy。发布包基于 Debian 12 构建，支持 x86_64 / ARM64；Realm 2.9.6 独立安装。
 
@@ -37,9 +37,9 @@ sudo python3 deploy/manage.py install \
 
 安装时交互设置密码。将 `import /etc/relaydeck/Caddyfile` 加入现有 Caddy 配置，验证后重载。面板默认 HTTPS `17443`，可在 `--origin` 指定其他端口；升级保留原端口。开放面板 TCP 端口、证书验证所需的 TCP 80 及转发端口；443 可供其他服务使用。Cloudflare 域名设为“仅 DNS”，访问网址须带高位端口。
 
-数据位于 `/var/lib/relaydeck`，配置位于 `/etc/relaydeck`。调整 `broker.json` 中的端口与资源预算以适配主机；systemd 自定义项使用 drop-in。备份需同时保留一致的数据库与 MFA 密钥。
+数据位于 `/var/lib/relaydeck`，配置位于 `/etc/relaydeck`。调整 `broker.json` 中的端口范围与保留端口以适配主机；systemd 自定义项使用 drop-in。备份需同时保留一致的数据库与 MFA 密钥。
 
-升级入口位于“设置”，仅初始所有者可操作，需密码与 MFA。升级会短暂中断全部转发；修改规则仅重启对应规则。当前最多 10 个租户、全站 30 条规则，无多节点或流量计量。
+升级入口位于“设置”，仅初始所有者可操作，需密码与 MFA。升级会短暂中断全部转发；修改规则仅重启对应规则。租户数默认 10 个，安装时可用 `--max-tenants` 指定，之后用 `sudo python3 /usr/local/libexec/relaydeck-manage.py capacity --max-tenants N` 扩容；每个账户最多 30 条规则，可设按月流量额度；不支持多节点。
 
 ## 本地开发
 

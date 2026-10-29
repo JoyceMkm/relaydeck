@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REPOSITORY = 'JoyceBupt/relaydeck'
+REPOSITORY = 'JoyceMkm/relaydeck'
 REPOSITORY_ID = 1403407084
 POLICY = pathlib.Path('/etc/relaydeck/upgrade.json')
 ROOT = pathlib.Path('/var/lib/relaydeck/updates')
@@ -316,6 +316,10 @@ class Controller:
         if op == 'check' and set(request) == {'op'}:
             if self.checked_time and time.monotonic() - self.checked_at < 60:
                 return self.status()
+            # A renamed owner's old name can be claimed by someone else; never offer their releases.
+            if fetch_json('').get('id') != REPOSITORY_ID:
+                self.offer = None
+                raise ValueError('Release repository identity has changed')
             try:
                 release = fetch_json('/releases/latest')
             except urllib.error.HTTPError as error:

@@ -37,7 +37,7 @@ class UpgradeFlow(unittest.TestCase):
     def offer(self):
         with patch.object(upgrade, 'fetch_json', side_effect=lambda path: {'id':upgrade.REPOSITORY_ID} if path == '' else release()):
             state = self.controller.dispatch({'op': 'check'})
-        self.assertEqual(state['latest']['release_url'], 'https://github.com/JoyceBupt/relaydeck/releases/tag/v0.2.0')
+        self.assertEqual(state['latest']['release_url'], 'https://github.com/JoyceMkm/relaydeck/releases/tag/v0.2.0')
         return state['latest']['offer']
 
     def start(self):
@@ -87,6 +87,18 @@ class UpgradeFlow(unittest.TestCase):
                 self.controller.dispatch({'op': 'check'})
             fetch.assert_called_once()
         self.assertEqual(self.controller.status()['latest']['offer'], token)
+
+    def test_claimed_repository_name_cannot_offer_or_keep_a_release(self):
+        token = self.offer()
+        self.controller.checked_at -= 61
+        with patch.object(upgrade, 'fetch_json', side_effect=lambda path: {'id': upgrade.REPOSITORY_ID + 1} if path == '' else release()):
+            with self.assertRaises(ValueError):
+                self.controller.dispatch({'op': 'check'})
+        self.assertIsNone(self.controller.status()['latest'])
+        with patch.object(upgrade, 'launch') as launch:
+            with self.assertRaises(upgrade.UpgradeError):
+                self.controller.dispatch({'op': 'start', 'offer': token})
+            launch.assert_not_called()
 
     def test_job_checks_manifest_and_reports_success_after_update(self):
         state = self.start()
